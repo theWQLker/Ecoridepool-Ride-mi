@@ -1,4 +1,4 @@
-<?php
+
 
 namespace App\Controllers;
 
@@ -11,18 +11,10 @@ use PDO;
 
 class ProfileController
 {
-    /** @var Twig  Vue Twig • Twig view engine */
     protected Twig $view;
-    /** @var PDO   Connexion MySQL • MySQL connection */
     protected PDO $db;
-    /** @var Collection  Collection préférences (Mongo) • Mongo prefs collection */
     protected Collection $prefsCollection;
 
-    /*--------------------------------------------------------------------
-      __construct()
-      FR : Injecte la vue, la BDD MySQL et la collection MongoDB
-      EN : Inject Twig view, MySQL DB and MongoDB collection
-    --------------------------------------------------------------------*/
     public function __construct(ContainerInterface $container)
     {
         $this->view            = $container->get('view');
@@ -30,45 +22,38 @@ class ProfileController
         $this->prefsCollection = $container->get('prefsCollection');
     }
 
-    /*--------------------------------------------------------------------
-      show()
-      FR : Affiche la page de profil utilisateur
-      EN : Render user profile page
-    --------------------------------------------------------------------*/
     public function show(Request $request, Response $response): Response
     {
-        // Redirige vers /login si non connecté • Redirect if not logged-in
         if (!isset($_SESSION['user'])) {
-            return $response->withHeader('Location', '/login')
-                ->withStatus(302);
+            return $response->withHeader('Location', '/login')->withStatus(302);
         }
 
         $userId = $_SESSION['user']['id'];
 
-        /* 1) Infos utilisateur (MySQL) -------------------------------- */
+        // 1. Get user info from MySQL
         $stmt = $this->db->prepare("
-            SELECT id, name, email, role, credits, driver_rating
-            FROM users
+            SELECT id, name, email, role, credits, driver_rating 
+            FROM users 
             WHERE id = ?
         ");
         $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        /* 2) Nb de trajets terminés en tant que passager -------------- */
+        // 2. Count completed rides as a passenger
         $rideCountStmt = $this->db->prepare("
-            SELECT COUNT(*)
-            FROM ride_requests
-            WHERE passenger_id = :id
+            SELECT COUNT(*) 
+            FROM ride_requests 
+            WHERE passenger_id = :id 
               AND status = 'completed'
         ");
         $rideCountStmt->execute(['id' => $userId]);
         $ridesCompleted = (int)$rideCountStmt->fetchColumn();
 
-        /* 3) Préférences stockées dans Mongo -------------------------- */
-        $prefDoc     = $this->prefsCollection->findOne(['user_id' => $userId]);
+        // 3. Fetch MongoDB preferences via injected collection
+        $prefDoc = $this->prefsCollection->findOne(['user_id' => $userId]);
         $preferences = $prefDoc['preferences'] ?? [];
 
-        /* 4) Avis écrits par l’utilisateur ---------------------------- */
+        // 4. Fetch reviews written by user
         $stmt = $this->db->prepare("
             SELECT rr.rating, rr.comment, u.name AS driver_name
             FROM ride_reviews rr
@@ -79,11 +64,10 @@ class ProfileController
         $stmt->execute(['id' => $userId]);
         $reviewsWritten = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        /* 5) Si conducteur : avis reçus + véhicule -------------------- */
+        // 5. If driver, fetch received reviews and vehicle
         $reviewsReceived = [];
-        $vehicle         = null;
+        $vehicle = null;
         if ($user['role'] === 'driver') {
-            // Avis reçus
             $stmt = $this->db->prepare("
                 SELECT rr.rating, rr.comment, u.name AS reviewer_name
                 FROM ride_reviews rr
@@ -94,10 +78,9 @@ class ProfileController
             $stmt->execute(['id' => $userId]);
             $reviewsReceived = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            // Infos véhicule
             $stmt = $this->db->prepare("
-                SELECT make, model, year, plate, energy_type, seats
-                FROM vehicles
+                SELECT make, model, year, plate, energy_type, seats 
+                FROM vehicles 
                 WHERE driver_id = ?
                 LIMIT 1
             ");
@@ -105,34 +88,27 @@ class ProfileController
             $vehicle = $stmt->fetch(PDO::FETCH_ASSOC);
         }
 
-        /* 6) Rendu de la vue profil ----------------------------------- */
+        // 6. Render profile page
         return $this->view->render($response, 'profile.twig', [
-            'user'             => $user,
-            'preferences'      => $preferences,
-            'rides_completed'  => $ridesCompleted,
-            'reviews_written'  => $reviewsWritten,
+            'user'            => $user,
+            'preferences'     => $preferences,
+            'rides_completed' => $ridesCompleted,
+            'reviews_written' => $reviewsWritten,
             'reviews_received' => $reviewsReceived,
-            'vehicle'          => $vehicle,
+            'vehicle'         => $vehicle,
         ]);
     }
 
-    /*--------------------------------------------------------------------
-      update()
-      FR : Sauvegarde des préférences utilisateur (MongoDB)
-      EN : Save user preferences to MongoDB
-    --------------------------------------------------------------------*/
     public function update(Request $request, Response $response): Response
     {
-        // Sécurité : doit être connecté • Must be logged-in
         if (!isset($_SESSION['user'])) {
-            return $response->withHeader('Location', '/login')
-                ->withStatus(302);
+            return $response->withHeader('Location', '/login')->withStatus(302);
         }
 
         $userId = $_SESSION['user']['id'];
         $data   = $request->getParsedBody();
 
-        /* Construction du tableau preferences • Build preferences array */
+        // Build preferences array
         $preferences = [
             'smoking_allowed'  => !empty($data['smoking_allowed']),
             'allow_pets'       => !empty($data['allow_pets']),
@@ -140,16 +116,14 @@ class ProfileController
             'chat_preference'  => $data['chat_preference']  ?? 'Casual',
         ];
 
-        /* Upsert dans Mongo (atlas) ----------------------------------- */
+        // Upsert preferences into MongoDB Atlas
         $this->prefsCollection->updateOne(
             ['user_id' => $userId],
             ['$set'    => ['preferences' => $preferences]],
             ['upsert'  => true]
         );
 
-        // Flash message + redirection profil
         $_SESSION['flash'] = 'Preferences saved successfully.';
-        return $response->withHeader('Location', '/profile')
-            ->withStatus(302);
+        return $response->withHeader('Location', '/profile')->withStatus(302);
     }
 }

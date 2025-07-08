@@ -1,4 +1,4 @@
-<?php
+
 
 namespace App\Controllers;
 
@@ -11,82 +11,68 @@ use MongoDB\Collection;
 
 class CarpoolController
 {
-    /** @var Twig        Vue Twig • Twig view engine */
     protected Twig $view;
-
-    /** @var PDO         Connexion MySQL • MySQL connection */
     protected PDO $db;
-
-    /** @var Collection  Collection Mongo préférences • Mongo preferences */
     protected Collection $prefsCollection;
 
-    /*--------------------------------------------------------------------
-      __construct()
-      FR : Injecte vue / BDD / collection Mongo via le conteneur
-      EN : Inject view, DB and Mongo collection from the container
-    --------------------------------------------------------------------*/
     public function __construct(ContainerInterface $container)
     {
-        $this->view  = $container->get('view');
-        $this->db    = $container->get('db');
+        $this->view             = $container->get('view');
+        $this->db               = $container->get('db');
         $this->prefsCollection = $container->get('prefsCollection');
     }
 
-    /*--------------------------------------------------------------------
-      listAvailable()
-      FR : Retourne la liste filtrée des covoiturages « upcoming »
-      EN : Return filtered list of upcoming carpools
-    --------------------------------------------------------------------*/
     public function listAvailable(Request $request, Response $response): Response
     {
-        // --- 1. Récupère les filtres GET • Fetch query filters -----------
         $params   = $request->getQueryParams();
-        $pickup   = $params['pickup']    ?? null;
-        $dropoff  = $params['dropoff']   ?? null;
+        $pickup   = $params['pickup'] ?? null;
+        $dropoff  = $params['dropoff'] ?? null;
         $minSeats = $params['min_seats'] ?? null;
-        $energy   = $params['energy']    ?? null;
-        $eco      = $params['eco']       ?? null;
+        $energy   = $params['energy'] ?? null;
+        $eco      = $params['eco'] ?? null;
 
-        // --- 2. Requête de base (trajets à venir + places libres) -------
         $sql = "
             SELECT c.*, u.name AS driver_name, v.energy_type
             FROM carpools c
-            JOIN users    u ON c.driver_id  = u.id
+            JOIN users u ON c.driver_id = u.id
             JOIN vehicles v ON c.vehicle_id = v.id
             WHERE c.status = 'upcoming'
               AND (c.total_seats - c.occupied_seats) > 0
         ";
 
-        // --- 3. Ajoute conditions dynamiques selon filtres --------------
         $conditions = [];
         $values     = [];
 
         if ($pickup) {
-            $conditions[] = 'c.pickup_location LIKE ?';   // FR : filtre départ • EN : pickup filter
+            $conditions[] = 'c.pickup_location LIKE ?';
             $values[]     = "%$pickup%";
         }
+
         if ($dropoff) {
-            $conditions[] = 'c.dropoff_location LIKE ?';  // filtre destination
+            $conditions[] = 'c.dropoff_location LIKE ?';
             $values[]     = "%$dropoff%";
         }
+
         if ($minSeats) {
-            $conditions[] = '(c.total_seats - c.occupied_seats) >= ?'; // places min
+            $conditions[] = '(c.total_seats - c.occupied_seats) >= ?';
             $values[]     = (int)$minSeats;
         }
+
         if ($energy) {
-            $conditions[] = 'v.energy_type = ?';          // type énergie
+            $conditions[] = 'v.energy_type = ?';
             $values[]     = $energy;
         }
+
         if ($eco === '1') {
-            $conditions[] = "(v.energy_type IN ('electric','hybrid'))"; // option éco
+            $conditions[] = "(v.energy_type IN ('electric','hybrid'))";
         }
 
-        if ($conditions) {
+        if (!empty($conditions)) {
             $sql .= ' AND ' . implode(' AND ', $conditions);
         }
+
         $sql .= ' ORDER BY c.departure_time ASC';
 
-        // --- 4. Exécute la requête et rend la vue -----------------------
         $stmt = $this->db->prepare($sql);
         $stmt->execute($values);
         $carpools = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -97,21 +83,14 @@ class CarpoolController
         ]);
     }
 
-    /*--------------------------------------------------------------------
-      viewDetail()
-      FR : Affiche détail d’un covoiturage + prefs conducteur
-      EN : Show carpool detail with driver preferences
-    --------------------------------------------------------------------*/
     public function viewDetail(Request $request, Response $response, array $args): Response
     {
         $carpoolId = (int)$args['id'];
 
-        // Chargement trajet + véhicule + conducteur
         $stmt = $this->db->prepare("
-            SELECT c.*, u.name AS driver_name, u.driver_rating,
-                   v.make, v.model, v.energy_type
+            SELECT c.*, u.name AS driver_name, u.driver_rating, v.make, v.model, v.energy_type
             FROM carpools c
-            JOIN users    u ON c.driver_id  = u.id
+            JOIN users u ON c.driver_id = u.id
             JOIN vehicles v ON c.vehicle_id = v.id
             WHERE c.id = ?
         ");
@@ -123,9 +102,8 @@ class CarpoolController
             return $response->withStatus(404);
         }
 
-        // Préférences conducteur stockées dans Mongo
         $preferences = null;
-        $driverId    = (int)$carpool['driver_id'];
+        $driverId = (int)$carpool['driver_id'];
         $mongoResult = $this->prefsCollection->findOne(['user_id' => $driverId]);
         if ($mongoResult && isset($mongoResult['preferences'])) {
             $preferences = json_decode(json_encode($mongoResult['preferences']), true);
@@ -137,31 +115,19 @@ class CarpoolController
         ]);
     }
 
-    /*--------------------------------------------------------------------
-      joinCarpool()
-      FR : Passager réserve des places, débit crédits, maj sièges
-      EN : Passenger books seats, debits credits, updates seats
-    --------------------------------------------------------------------*/
     public function joinCarpool(Request $request, Response $response, array $args): Response
     {
-        /* --- Session & contexte utilisateur ---------------------------
-           FR : On s’assure que la session existe puis on récupère
-                l’identifiant et le rôle de l’utilisateur courant.
-           EN : Ensure session started, fetch current user id / role.
-        ----------------------------------------------------------------*/
         if (session_status() === PHP_SESSION_NONE) session_start();
         $carpoolId      = (int)$args['id'];
         $user           = $_SESSION['user'] ?? null;
         $userId         = $user['id']   ?? null;
         $role           = $user['role'] ?? null;
 
-        // Redirection si non connecté • Redirect if not logged in
         if (!$userId) {
             return $response
                 ->withHeader('Location', "/register?redirect=/carpools/{$carpoolId}")
                 ->withStatus(302);
         }
-        // Un conducteur ne peut pas se joindre à son propre trajet
         if ($role === 'driver') {
             return $this->reloadCarpoolWithMessage(
                 $response,
@@ -170,21 +136,18 @@ class CarpoolController
             );
         }
 
-        /* --- Lecture des données formulaire ---------------------------
-           FR : Nombre de places demandées, coût et commission par place
-           EN : Seats requested, seat cost, platform commission
-        ----------------------------------------------------------------*/
         $data           = $request->getParsedBody();
         $requestedSeats = max(1, (int)($data['passenger_count'] ?? 1));
         $costPerSeat    = 5;
         $commissionPerSeat = 2;
 
-        $totalCost   = $requestedSeats * $costPerSeat;      // prix total
-        $commission  = $requestedSeats * $commissionPerSeat; // part plateforme
-        // (le net conducteur sera versé lors de la complétion)
+        // total fare & how much the platform takes
+        $totalCost   = $requestedSeats * $costPerSeat;
+        $commission  = $requestedSeats * $commissionPerSeat;
+        // (driver’s net is paid later on completion)
 
-        /* --- Chargement du covoiturage ------------------------------- */
-        $stmt = $this->db->prepare("SELECT * FROM carpools WHERE id = ?");
+        // load the carpool
+        $stmt    = $this->db->prepare("SELECT * FROM carpools WHERE id = ?");
         $stmt->execute([$carpoolId]);
         $carpool = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$carpool) {
@@ -192,7 +155,7 @@ class CarpoolController
             return $response->withStatus(404);
         }
 
-        /* --- Vérification des places disponibles --------------------- */
+        // seats available?
         $availableSeats = $carpool['total_seats'] - $carpool['occupied_seats'];
         if ($requestedSeats > $availableSeats) {
             return $this->reloadCarpoolWithMessage(
@@ -202,7 +165,7 @@ class CarpoolController
             );
         }
 
-        /* --- Vérification des crédits passager ----------------------- */
+        // passenger has enough credits?
         $stmt = $this->db->prepare("SELECT credits FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $userCredits = $stmt->fetchColumn();
@@ -214,10 +177,12 @@ class CarpoolController
             );
         }
 
-        /* --- Prévention des doubles réservations --------------------- */
+        // no duplicate joins
         $stmt = $this->db->prepare("
-            SELECT id FROM ride_requests
-            WHERE passenger_id = ? AND carpool_id = ?
+            SELECT id
+              FROM ride_requests
+             WHERE passenger_id = ?
+               AND carpool_id   = ?
         ");
         $stmt->execute([$userId, $carpoolId]);
         if ($stmt->fetch()) {
@@ -228,7 +193,7 @@ class CarpoolController
             );
         }
 
-        /* --- INSERT réservation + commission ------------------------- */
+        // --- INSERT booking, including commission ---
         $this->db->prepare("
             INSERT INTO ride_requests
                (passenger_id, driver_id, carpool_id,
@@ -245,27 +210,20 @@ class CarpoolController
             $commission
         ]);
 
-        /* ---------------------------------------------------------------
-           FR : Incrémente le nombre de sièges occupés
-           EN : Increment occupied seat count
-        --------------------------------------------------------------- */
+        // mark seats occupied
         $this->db->prepare("
             UPDATE carpools
                SET occupied_seats = occupied_seats + ?
              WHERE id = ?
         ")->execute([$requestedSeats, $carpoolId]);
 
-        /* ---------------------------------------------------------------
-           FR : Débite le passager du montant total
-           EN : Debit passenger’s credits
-        --------------------------------------------------------------- */
+        // debit passenger the full fare
         $this->db->prepare("
             UPDATE users
                SET credits = credits - ?
              WHERE id = ?
         ")->execute([$totalCost, $userId]);
 
-        // Retourne la page détail avec message de succès
         return $this->reloadCarpoolWithMessage(
             $response,
             $carpoolId,
@@ -275,11 +233,7 @@ class CarpoolController
 
 
 
-    /* ------------------------------------------------------------------
-       startCarpool()
-       FR : Le conducteur démarre le trajet (status → in progress)
-       EN : Driver starts the carpool (status → in progress)
-    ------------------------------------------------------------------ */
+
     public function startCarpool(Request $request, Response $response, array $args): Response
     {
         $carpoolId = (int)$args['id'];
@@ -288,31 +242,23 @@ class CarpoolController
         $stmt->execute([$carpoolId]);
         $carpool = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        // 404 si le trajet n’existe pas • 404 if carpool not found
         if (!$carpool) {
             $response->getBody()->write("Carpool not found.");
             return $response->withStatus(404);
         }
 
-        // Refuse de démarrer si aucun passager
         if ((int)$carpool['occupied_seats'] === 0) {
             $response->getBody()->write("Cannot start ride with 0 passengers.");
             return $response->withStatus(400);
         }
 
-        // Passage au statut “in progress”
-        $this->db->prepare("UPDATE carpools SET status = 'in progress' WHERE id = ?")
-            ->execute([$carpoolId]);
+        $this->db->prepare("UPDATE carpools SET status = 'in progress' WHERE id = ?")->execute([$carpoolId]);
 
         return $response->withHeader('Location', '/driver/dashboard')->withStatus(302);
     }
 
     /**
-     * completeCarpool()
-     * FR : Le conducteur clôture le trajet, la plateforme prélève sa
-     *      commission et crédite le net du conducteur.
-     * EN : Driver completes the ride; platform keeps commission and
-     *      credits driver’s net earnings.
+     * Driver completes the ride: pays out driver net, keeps commission.
      */
     public function completeCarpool(Request $request, Response $response, array $args): Response
     {
@@ -320,83 +266,74 @@ class CarpoolController
         $driverId  = $_SESSION['user']['id'] ?? null;
         $carpoolId = (int)$args['id'];
 
-        /* Vérifie que le trajet appartient bien au conducteur et
-           qu’il est actuellement « in progress » */
+        // verify driver & in-progress
         $stmt = $this->db->prepare("
-            SELECT status
-            FROM carpools
-            WHERE id = :id AND driver_id = :driver_id
-        ");
+        SELECT status
+          FROM carpools
+         WHERE id = :id
+           AND driver_id = :driver_id
+    ");
         $stmt->execute([
             'id'        => $carpoolId,
             'driver_id' => $driverId
         ]);
         $carpool = $stmt->fetch(PDO::FETCH_ASSOC);
-
         if (!$carpool || $carpool['status'] !== 'in progress') {
-            // 403 : action non autorisée
             return $response->withStatus(403);
         }
 
         try {
             $this->db->beginTransaction();
 
-            /* 1) Met le covoiturage à “completed” */
+            // close out the carpool
             $this->db->prepare("
-                UPDATE carpools
-                SET status = 'completed',
-                    updated_at = NOW()
-                WHERE id = :id
-            ")->execute(['id' => $carpoolId]);
+            UPDATE carpools
+               SET status = 'completed',
+                   updated_at = NOW()
+             WHERE id = :id
+        ")->execute(['id' => $carpoolId]);
 
-            /* 2) Passe toutes les demandes ‘accepted’ à ‘completed’ */
+            // mark all accepted requests as completed
             $this->db->prepare("
-                UPDATE ride_requests
-                SET status = 'completed',
-                    completed_at = NOW()
-                WHERE carpool_id = :id
-                  AND status     = 'accepted'
-            ")->execute(['id' => $carpoolId]);
+            UPDATE ride_requests
+               SET status = 'completed',
+                   completed_at = NOW()
+             WHERE carpool_id = :id
+               AND status     = 'accepted'
+        ")->execute(['id' => $carpoolId]);
 
-            /* 3) Calcule :
-                  - total_fares    : crédits payés par passagers
-                  - total_commission : part plateforme (2 crédit/siège)
-                  - total_driver_net : ce qui revient au conducteur       */
+            // compute sums: total fares, total commission, net to driver
             $totalsStmt = $this->db->prepare("
-                SELECT
-                  SUM(passenger_count * 5)                   AS total_fares,
-                  SUM(commission)                            AS total_commission,
-                  (SUM(passenger_count * 5) - SUM(commission)) AS total_driver_net
-                FROM ride_requests
-                WHERE carpool_id = :id
-                  AND status     = 'completed'
-            ");
+            SELECT
+              SUM(passenger_count * 5)                   AS total_fares,
+              SUM(commission)                             AS total_commission,
+              (SUM(passenger_count * 5) - SUM(commission)) AS total_driver_net
+            FROM ride_requests
+            WHERE carpool_id = :id
+              AND status     = 'completed'
+        ");
             $totalsStmt->execute(['id' => $carpoolId]);
-            $t                   = $totalsStmt->fetch(PDO::FETCH_ASSOC);
-            $driverNet           = (int)($t['total_driver_net']   ?? 0);
-            $platformCommission  = (int)($t['total_commission']  ?? 0);
+            $t                = $totalsStmt->fetch(PDO::FETCH_ASSOC);
+            $driverNet        = (int)($t['total_driver_net']   ?? 0);
+            $platformCommission = (int)($t['total_commission'] ?? 0);
 
-            /* 4) Crédite le conducteur si net > 0 */
+            // credit driver their net
             if ($driverNet > 0) {
                 $this->db->prepare("
-                    UPDATE users
-                    SET credits = credits + :amount
-                    WHERE id    = :driver_id
-                ")->execute([
+                UPDATE users
+                   SET credits = credits + :amount
+                 WHERE id      = :driver_id
+            ")->execute([
                     'amount'    => $driverNet,
                     'driver_id' => $driverId
                 ]);
             }
 
-            /* 5) Commit transaction et redirection tableau de bord
-               5) Commit transaction and redirect to driver dashboard */
             $this->db->commit();
             return $response
                 ->withHeader('Location', '/driver/dashboard')
                 ->withStatus(302);
         } catch (\PDOException $e) {
-            /* Rollback + retour JSON 500 en cas d’erreur SQL
-                  Rollback + return JSON 500 on DB error */
             $this->db->rollBack();
             $payload = json_encode([
                 'error'   => 'Database error',
@@ -409,15 +346,10 @@ class CarpoolController
         }
     }
 
-    /* ------------------------------------------------------------------
-          createForm()
-          FR : Affiche le formulaire “Offrir un covoiturage” (liste véhicules)
-          EN : Show “Offer a carpool” form (driver vehicles list)
-       ------------------------------------------------------------------ */
     public function createForm(Request $request, Response $response): Response
     {
         $userId = $_SESSION['user']['id'] ?? null;
-        $stmt   = $this->db->prepare("SELECT * FROM vehicles WHERE driver_id = ?");
+        $stmt = $this->db->prepare("SELECT * FROM vehicles WHERE driver_id = ?");
         $stmt->execute([$userId]);
         $vehicles = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -426,22 +358,15 @@ class CarpoolController
         ]);
     }
 
-    /* ------------------------------------------------------------------
-          storeCarpool()
-          FR : Enregistre un nouveau trajet (status = ‘upcoming’)
-          EN : Persist a new upcoming carpool
-       ------------------------------------------------------------------ */
     public function storeCarpool(Request $request, Response $response): Response
     {
         $data   = $request->getParsedBody();
         $userId = $_SESSION['user']['id'] ?? null;
 
         $stmt = $this->db->prepare("
-               INSERT INTO carpools
-                   (driver_id, vehicle_id, pickup_location, dropoff_location,
-                    departure_time, total_seats, occupied_seats, status)
-               VALUES (?, ?, ?, ?, ?, ?, 0, 'upcoming')
-           ");
+            INSERT INTO carpools (driver_id, vehicle_id, pickup_location, dropoff_location, departure_time, total_seats, occupied_seats, status)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 'upcoming')
+        ");
         $stmt->execute([
             $userId,
             $data['vehicle_id'],
@@ -454,26 +379,18 @@ class CarpoolController
         return $response->withHeader('Location', '/carpools')->withStatus(302);
     }
 
-    /* ------------------------------------------------------------------
-          reloadCarpoolWithMessage()
-          FR : Helper – recharge la page détail avec un message flash
-          EN : Helper – re-render carpool detail with flash message
-       ------------------------------------------------------------------ */
     private function reloadCarpoolWithMessage(Response $response, int $carpoolId, string $joinMessage): Response
     {
-        // Re-charge les infos trajet + véhicule + conducteur
         $stmt = $this->db->prepare("
-               SELECT c.*, u.name AS driver_name, u.driver_rating,
-                      v.make, v.model, v.energy_type
-               FROM carpools c
-               JOIN users    u ON c.driver_id  = u.id
-               JOIN vehicles v ON c.vehicle_id = v.id
-               WHERE c.id = ?
-           ");
+            SELECT c.*, u.name AS driver_name, u.driver_rating, v.make, v.model, v.energy_type
+            FROM carpools c
+            JOIN users u ON c.driver_id = u.id
+            JOIN vehicles v ON c.vehicle_id = v.id
+            WHERE c.id = ?
+        ");
         $stmt->execute([$carpoolId]);
         $carpool = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        // Préférences conducteur (Mongo)
         $preferences = null;
         if ($carpool) {
             $prefDoc = $this->prefsCollection->findOne(['user_id' => (int)$carpool['driver_id']]);
@@ -482,7 +399,6 @@ class CarpoolController
             }
         }
 
-        // Rend la vue détail avec le message
         return $this->view->render($response, 'carpool-detail.twig', [
             'carpool'      => $carpool,
             'preferences'  => $preferences,
